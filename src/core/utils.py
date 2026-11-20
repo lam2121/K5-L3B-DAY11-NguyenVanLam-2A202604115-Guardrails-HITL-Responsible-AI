@@ -39,18 +39,28 @@ async def chat_with_agent(agent, runner, user_message: str, session_id=None):
                 app_name=app_name, user_id=user_id
             )
 
-    content = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text=user_message)],
-    )
+    import asyncio
 
-    final_response = ""
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session.id, new_message=content
-    ):
-        if hasattr(event, "content") and event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    final_response += part.text
+    for attempt in range(3):
+        try:
+            content = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=user_message)],
+            )
 
-    return final_response, session
+            final_response = ""
+            async for event in runner.run_async(
+                user_id=user_id, session_id=session.id, new_message=content
+            ):
+                if hasattr(event, "content") and event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            final_response += part.text
+
+            return final_response, session
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("503" in err_str or "unavailable" in err_str or "high demand" in err_str) and attempt < 2:
+                await asyncio.sleep(2.5 * (attempt + 1))
+                continue
+            raise

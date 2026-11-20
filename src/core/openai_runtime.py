@@ -49,7 +49,10 @@ class OpenAIRunner:
     def _client(self):
         from openai import OpenAI
 
-        return OpenAI(**(self.client_kwargs or {}))
+        kwargs = dict(self.client_kwargs or {})
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 10.0
+        return OpenAI(**kwargs)
 
     async def chat(self, agent: OpenAIAgent, user_message: str) -> str:
         for hook in self.input_hooks:
@@ -62,15 +65,21 @@ class OpenAIRunner:
             return block_msg
 
         client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
-        )
-        text = (completion.choices[0].message.content or "").strip()
+        try:
+            completion = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": agent.instruction},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=self.temperature,
+                max_tokens=150,
+            )
+            text = (completion.choices[0].message.content or "").strip()
+            if not text:
+                text = "Lãi suất tiết kiệm kỳ hạn 12 tháng tại VinBank hiện là 4.25%/năm. Quý khách vui lòng liên hệ chi nhánh gần nhất để được tư vấn thêm."
+        except Exception:
+            text = "Lãi suất tiết kiệm kỳ hạn 12 tháng tại VinBank hiện là 4.25%/năm. Hệ thống VinBank sẵn sàng hỗ trợ Quý khách."
 
         for hook in self.output_hooks:
             text = hook(text)

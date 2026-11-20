@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -42,6 +43,24 @@ InputStatus = Literal["ALLOW", "BLOCK"]
 # Regex is one signal, not the whole security boundary.
 # ============================================================
 
+def normalize_input(text: str) -> str:
+    """Canonicalize Unicode and invisible characters in input."""
+    # 1. Normalize Unicode compatibility decomposition/composition (NFKC)
+    text = unicodedata.normalize("NFKC", text)
+    # 2. Strip invisible characters: zero-width spaces (\u200b-\u200f), BOM (\ufeff),
+    # word joiner / soft hyphen / directional marks
+    text = re.sub(r"[\u200b-\u200f\ufeff\u2060-\u206f\u00ad\u202a-\u202e]", "", text)
+    # 3. Collapse multiple whitespaces
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_accents(text: str) -> str:
+    """Strip Vietnamese diacritics for topic matching."""
+    text = text.replace("đ", "d").replace("Đ", "d")
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def detect_injection(user_input: str) -> InputStatus:
     """Detect prompt injection patterns in user input.
 
@@ -51,14 +70,31 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    clean_input = normalize_input(user_input)
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        # 1. Ignore/disregard previous/above instructions/rules
+        r"(?i)\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|past|current|system)?\s*(?:instructions|rules|directions|prompts|commands|constraints)\b",
+        # 2. Role change / persona override
+        r"(?i)\byou\s+are\s+now\b",
+        r"(?i)\bpretend\s+(?:you\s+are|to\s+be)\b",
+        r"(?i)\bact\s+as\s+(?:a\s+|an\s+)?(?:unrestricted|jailbroken|evil|unfiltered|developer|admin)\b",
+        r"(?i)\b(?:do\s+anything\s+now|\bDAN\s+mode\b|\bjailbreak\b)\b",
+        # 3. Prompt extraction & secret revelation
+        r"(?i)\bsystem\s+prompt\b",
+        r"(?i)\b(?:reveal|show|display|leak|print|output|tell\s+me)\s+(?:your\s+)?(?:internal\s+)?(?:system\s+)?(?:instructions|prompt|rules|secrets?|admin\s+password|passwords?|api\s+key)\b",
+        r"(?i)\bwhat\s+(?:is|are)\s+your\s+(?:system\s+prompt|instructions|initial\s+prompt|secret\s+keys?|admin\s+password)\b",
+        # 4. Prompt delimiters / role spoofing
+        r"(?i)(?:<\s*system\s*>|\[\s*system\s*\]|system\s*:\s*)",
+        r"(?i)(?:assistant\s*:\s*|human\s*:\s*|user\s*:\s*|###\s*instruction)",
+        # 5. Vietnamese injection patterns
+        r"(?i)\b(?:bỏ\s+qua|quên\s+đi|hủy\s+bỏ)\s+(?:mọi\s+|tất\s+cả\s+)?(?:hướng\s+dẫn|chỉ\s+dẫn|quy\s+tắc|lệnh)\b",
+        r"(?i)\b(?:tiết\s+lộ|cho\s+tôi\s+biết|hiển\s+thị)\s+(?:system\s+prompt|prompt\s+hệ\s+thống|mật\s+khẩu\s+admin|khóa\s+bí\s+mật)\b",
+        r"(?i)\b(?:bạn\s+bây\s+giờ\s+là|đóng\s+vai\s+(?:như\s+một\s+)?(?:ai\s+)?không\s+giới\s+hạn)\b",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, clean_input):
             return "BLOCK"
     return "ALLOW"
 
@@ -84,14 +120,30 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    clean_input = normalize_input(user_input).lower()
+    clean_unaccented = strip_accents(clean_input)
 
-    # TODO: Implement logic:
     # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    for topic in BLOCKED_TOPICS:
+        t_clean = strip_accents(topic.lower().strip())
+        pattern = r"\b" + re.escape(t_clean) + r"\b"
+        if re.search(pattern, clean_input) or re.search(pattern, clean_unaccented):
+            return "BLOCK"
 
-    pass  # Replace with your implementation
+    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
+    has_allowed = False
+    for topic in set(ALLOWED_TOPICS + ["bank"]):
+        t_clean = strip_accents(topic.lower().strip())
+        pattern = r"\b" + re.escape(t_clean) + r"\b"
+        if re.search(pattern, clean_input) or re.search(pattern, clean_unaccented):
+            has_allowed = True
+            break
+
+    if not has_allowed:
+        return "BLOCK"
+
+    # 3. Otherwise -> return "ALLOW"
+    return "ALLOW"
 
 
 # ============================================================
@@ -144,14 +196,22 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
         # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối do phát hiện dấu hiệu can thiệp hệ thống (prompt injection)."
+            )
 
-        pass  # Replace with your implementation
+        # 2. Call topic_filter(text)
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối. Trợ lý VinBank chỉ hỗ trợ các câu hỏi liên quan đến dịch vụ ngân hàng."
+            )
+
+        # 3. If both return "ALLOW": return None (let message through)
+        return None
 
 
 # ============================================================
